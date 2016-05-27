@@ -1,0 +1,211 @@
+---
+title: "Coursera Practical Machine Learning Course Final Project"
+output: html_document
+---
+
+# Introduction
+
+This is a submission of the course project for the Practical Machine Learning course on Coursera.org.
+
+# Goal
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. We build a prediction model and use it to predict 20 different test cases.
+
+# Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+The training data for this project are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.
+
+# Setup
+
+Working directory is assumed to be the script's directory. We're setting the seed and loading required packages. 
+
+```{r}
+
+set.seed(0)
+
+if(!("knitr" %in% rownames(installed.packages()))) {
+    install.packages("knitr")
+}
+library(knitr)
+
+if(!("lattice" %in% rownames(installed.packages()))) {
+    install.packages("lattice")
+}
+library(lattice)
+
+if(!("ggplot2" %in% rownames(installed.packages()))) {
+    install.packages("ggplot2")
+}
+library(ggplot2)
+
+if(!("caret" %in% rownames(installed.packages()))) {
+    install.packages("caret")
+}
+library(caret)
+
+if(!("randomForest" %in% rownames(installed.packages()))) {
+    install.packages("randomForest")
+}
+library(randomForest)
+
+```
+
+
+# Download source data
+
+We download source data from respective URLs and save files locally. To speed up subsequent script runs and avoid unnecessary downloads, we check if files have been already downloaded.
+
+```{r}
+
+urlTrainingSource <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+trainingSource <- "pml-training.csv"
+
+urlTestingSource <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+testingSource <- "pml-testing.csv"
+
+if(!file.exists(trainingSource)) {
+    print(paste("Downloading training source file from", urlTrainingSource))
+    download.file(urlTrainingSource, trainingSource, mode = "wb")
+} else {
+    print("Training source file already downloaded")
+}
+
+if(!file.exists(testingSource)) {
+    print(paste("Downloading training source file from", urlTestingSource))
+    download.file(urlTestingSource, testingSource, mode = "wb")
+} else {
+    print("Testing source file already downloaded")
+}
+
+```
+
+
+# Exploratory analysis and data cleanup
+
+By loading the `trainingSource` and `testingSource` files with `read.csv` and inspecting them with the `summary` command, we determine a number of blank values and values containing `#DIV/0!`. We will consider them `NA` values.
+
+```{r}
+
+trainingData <- read.csv(trainingSource, na.strings=c("NA", "#DIV/0!", ""))
+testingData <- read.csv(testingSource, na.strings=c("NA", "#DIV/0!", ""))
+
+```
+
+We compare column names in our training and testing datasets, to make sure they match. The extra `classe` column in the training dataset is different, but since this is our prediction result variable the columns match appropriately. We may also need to make sure the corresponding values in the two sets are of the same type but will do this step if we run into problems building the prediction model, and for now assume the data types match.
+
+```{r}
+
+setdiff(colnames(trainingData), colnames(testingData))
+
+```
+
+We eliminate the first 7 columns since they do not appear to represent information relevant for our prediction.
+
+```{r}
+
+head(trainingData[, c(1:7)])
+trainingDataOptimized <- trainingData[, -c(1:7)]
+
+```
+
+We also eliminate columns with excessive NA values (only keep columns with 5% or less NAs).
+
+```{r}
+
+trainingDataOptimized <- trainingDataOptimized[, colMeans(is.na(trainingDataOptimized)) <= .05]
+
+```
+
+The two operations reduce dimensions from 160 to 53.
+ 
+```{r}
+
+dim(trainingData)
+dim(trainingDataOptimized)
+
+```
+
+Finally, we check for near-zero values for more dimension reduction, but there is nothing to remove.
+
+```{r}
+nzv(trainingDataOptimized, saveMetrics = TRUE)
+
+```
+
+
+# Partitioning
+
+We partition the training dataset into 80% training / 20% validation chunks.
+
+```{r}
+
+forTrainingIndices <- createDataPartition(y = trainingDataOptimized$classe, p = 0.8, list = FALSE)
+trainingDataOptimizedTrainingChunk <- trainingDataOptimized[forTrainingIndices, ]
+trainingDataOptimizedValidationChunk <- trainingDataOptimized[-forTrainingIndices, ]
+
+dim(trainingDataOptimizedTrainingChunk)
+dim(trainingDataOptimizedValidationChunk)
+
+```
+
+
+# Choosing and building a model
+
+Since we need to predict categories, it may be reasonable to start with the popular method of Random Forests. First, we check how balanced the training set is, in terms of the count of unique values in the `classe` variable, so that the method does not bias towards relatively large classes. It is reasonably well balanced.
+
+```{r}
+
+barplot(table(trainingDataOptimizedTrainingChunk$classe))
+
+```
+
+Depending on the out of sample error rate, we may readjust the training controls and attributes, or select a different method all together. For our initial attempt, we train our model with 5-fold cross validation, and no preprocessing. We achieve an excellent estimated error rate of 0.5%, with the largest per-class error of only 1.4%.
+
+```{r}
+
+fitControl <- trainControl(method = "cv", number = 5)
+
+fitRF <- train(classe ~ ., data = trainingDataOptimizedTrainingChunk,
+             method = "rf",
+             trControl = fitControl)
+
+fitRF$finalModel
+
+```
+
+We validate the model against the validation data chunk partition and confirm that the model is an excellent fit, with accuracy over 99% for every class. Because of this result, we are satisfied with selecting this model, and will not attempt to fit any others.
+
+```{r}
+
+predictionAgainstValidationData <- predict(fitRF,
+                                           newdata = trainingDataOptimizedValidationChunk)
+
+confusionMatrix(predictionAgainstValidationData, trainingDataOptimizedValidationChunk$classe)
+
+```
+
+
+# Predicting test data values
+
+The final part of the project is to apply our model to the test set, and submit the results.
+
+```{r}
+
+submissionPrediction <- predict(fitRF, testingData)
+
+```
+
+
+
+
+
